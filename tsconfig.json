@@ -1,0 +1,20 @@
+{
+	"extends": "$app/tsconfig",
+	"compilerOptions": {
+		"strict": true,
+		"ignoreDeprecations": "6.0",
+		"types": [
+			"$app/types",
+			"./worker-configuration.d.ts"
+		],
+		"baseUrl": ".",
+		"paths": {
+			"$lib": ["src/lib"],
+			"$lib/*": ["src/lib/*"],
+			"#lib": ["src/lib"],
+			"#lib/*": ["src/lib/*"]
+		}
+	},
+	"include": ["src", "worker-configuration.d.ts", "vite.config.ts"],
+	"exclude": [".svelte-kit/output", ".svelte-kit/cloudflare", ".svelte-kit/cloudflare-tmp", "node_modules"]
+}
