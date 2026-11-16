@@ -5,6 +5,7 @@
 	import ThinkingPanel from '#lib/components/ThinkingPanel.svelte';
 	import { toSubjectSlug } from '#lib/utils/slug';
 	import { assembleLatexDocument } from '#lib/utils/latex';
+	import pdfWorkerUrl from 'pdfjs-dist/legacy/build/pdf.worker.min.mjs?url';
 
 	// Form State
 	let subjectName = $state('');
@@ -47,6 +48,11 @@
 	// Feedback State
 	let feedbackText = $state('');
 	let isRegenerating = $state(false);
+	const MAX_PDF_PAGES_PER_FILE = 12;
+	const PDF_RENDER_SCALE = 1.5;
+	const MAX_IMAGE_SIDE = 1800;
+	const JPEG_QUALITY = 0.85;
+	let pdfWorkerConfigured = false;
 
 	// Derived slug
 	let derivedSlug = $derived(toSubjectSlug(subjectName));
@@ -126,6 +132,98 @@
 		setTimeout(() => URL.revokeObjectURL(url), 1000);
 	}
 
+	function sanitizeBaseFilename(filename: string): string {
+		return filename.replace(/\.[^.]+$/, '').replace(/[^a-zA-Z0-9._-]/g, '_');
+	}
+
+	async function canvasToBlob(
+		canvas: HTMLCanvasElement,
+		type: string,
+		quality?: number
+	): Promise<Blob | null> {
+		return new Promise((resolve) => canvas.toBlob(resolve, type, quality));
+	}
+
+	async function convertPdfToImageFiles(pdfFile: File): Promise<File[]> {
+		const pdfjs = await import('pdfjs-dist/legacy/build/pdf.mjs');
+		if (!pdfWorkerConfigured) {
+			pdfjs.GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
+			pdfWorkerConfigured = true;
+		}
+		const bytes = new Uint8Array(await pdfFile.arrayBuffer());
+		const loadingTask = pdfjs.getDocument({
+			data: bytes,
+			useWorkerFetch: false
+		});
+
+		const pdf = await loadingTask.promise;
+		const maxPages = Math.min(pdf.numPages, MAX_PDF_PAGES_PER_FILE);
+		const base = sanitizeBaseFilename(pdfFile.name);
+		const imageFiles: File[] = [];
+
+		for (let pageNum = 1; pageNum <= maxPages; pageNum++) {
+			const page = await pdf.getPage(pageNum);
+			const baseViewport = page.getViewport({ scale: PDF_RENDER_SCALE });
+			const maxSide = Math.max(baseViewport.width, baseViewport.height);
+			const ratio = maxSide > MAX_IMAGE_SIDE ? MAX_IMAGE_SIDE / maxSide : 1;
+			const viewport = page.getViewport({ scale: PDF_RENDER_SCALE * ratio });
+
+			const canvas = document.createElement('canvas');
+			canvas.width = Math.max(1, Math.floor(viewport.width));
+			canvas.height = Math.max(1, Math.floor(viewport.height));
+
+			const ctx = canvas.getContext('2d');
+			if (!ctx) continue;
+
+			await page.render({
+				canvas,
+				canvasContext: ctx,
+				viewport,
+				background: 'white'
+			}).promise;
+
+			const blob = await canvasToBlob(canvas, 'image/jpeg', JPEG_QUALITY);
+			if (blob) {
+				imageFiles.push(
+					new File([blob], `${base}-page-${pageNum}.jpg`, {
+						type: 'image/jpeg'
+					})
+				);
+			}
+
+			canvas.width = 0;
+			canvas.height = 0;
+		}
+
+		await pdf.cleanup();
+		loadingTask.destroy();
+		return imageFiles;
+	}
+
+	async function normalizeFilesForImagePipeline(
+		files: File[],
+		categoryLabel: string
+	): Promise<File[]> {
+		const output: File[] = [];
+
+		for (const file of files) {
+			const isPdf = file.type === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf');
+			if (!isPdf) {
+				output.push(file);
+				continue;
+			}
+
+			statusMessage = `Converting ${categoryLabel} PDF to images: ${file.name}`;
+			const pages = await convertPdfToImageFiles(file);
+			if (pages.length === 0) {
+				throw new Error(`Failed to convert PDF to images: ${file.name}`);
+			}
+			output.push(...pages);
+		}
+
+		return output;
+	}
+
 	async function handleCopyLatex() {
 		const fullDoc = contentStream.includes('\\begin{document}')
 			? contentStream
@@ -172,12 +270,17 @@
 					formData.append('targetSlug', activeSlug);
 				}
 			} else {
+				statusMessage = 'Preparing image inputs from uploaded files…';
+				const normalizedCours = await normalizeFilesForImagePipeline(filesCours, 'Lessons');
+				const normalizedTds = await normalizeFilesForImagePipeline(filesTds, 'TDs/TPs');
+				const normalizedAutres = await normalizeFilesForImagePipeline(filesAutres, 'Other');
+
 				if (reuseExtracted) {
 					formData.append('reuseExtracted', 'true');
 				}
-				for (const f of filesCours) formData.append('files_cours', f);
-				for (const f of filesTds) formData.append('files_tds', f);
-				for (const f of filesAutres) formData.append('files_autres', f);
+				for (const f of normalizedCours) formData.append('files_cours', f);
+				for (const f of normalizedTds) formData.append('files_tds', f);
+				for (const f of normalizedAutres) formData.append('files_autres', f);
 			}
 
 			const response = await fetch('/api/generate', {

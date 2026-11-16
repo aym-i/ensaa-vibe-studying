@@ -6,12 +6,8 @@ declare global {
 		// interface Locals {}
 		// interface PageData {}
 		// interface PageState {}
-		interface Platform {
-			env: Env;
-			context: ExecutionContext;
-			caches: CacheStorage & { default: Cache };
-		}
+		// interface Platform {}
 	}
 }
 
-export {};
+export {}
